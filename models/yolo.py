@@ -306,24 +306,34 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
+    # c2初始化为输入图像的通道数
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+        # 将字符串转换为对应的model
         m = eval(m) if isinstance(m, str) else m  # eval strings
+        # 字符串转数字
         for j, a in enumerate(args):
             with contextlib.suppress(NameError):
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
 
+        # 数量乘以深度因子gd才是真正的数量
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
                 Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
                 BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x}:
+            # 以上模块的输出通道由配置文件中的args指定
+            # 输入、输出通道
             c1, c2 = ch[f], args[0]
+            # 通道数需要乘以宽度因子才是真正的通道数(最后层的输出通道除外)
             if c2 != no:  # if not output
+                # 向下取整取8的倍数
                 c2 = make_divisible(c2 * gw, 8)
 
-            args = [c1, c2, *args[1:]]
+            args = [c1, c2, *args[1:]] # 输入通道、输出通道、其它参数
             if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x}:
+                # 将数量作为参数插到第2个参数前
                 args.insert(2, n)  # number of repeats
+                # 在layer内进行数量的设置
                 n = 1
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
@@ -338,11 +348,15 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
                 args[3] = make_divisible(args[3] * gw, 8)
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
+        # SPD-Conv https://yolov5.blog.csdn.net/article/details/126398068
+        elif m is space_to_depth:
+            c2 = 4 * ch[f]
         elif m is Expand:
             c2 = ch[f] // args[0] ** 2
         else:
             c2 = ch[f]
 
+        # 通过参数args构建model
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum(x.numel() for x in m_.parameters())  # number params

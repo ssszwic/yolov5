@@ -358,3 +358,29 @@ def plot_mc_curve(px, py, save_dir=Path('mc_curve.png'), names=(), xlabel='Confi
     ax.set_title(f'{ylabel}-Confidence Curve')
     fig.savefig(save_dir, dpi=250)
     plt.close(fig)
+
+
+def plot_ap_curve(aps, save_dir=Path('ap_curve.png'), names=(), xlabel='epoch', ylabel='ap'):
+    fig, ax = plt.subplots(4, 3, figsize=(27, 24), tight_layout=True)
+    axes = ax.flatten()
+    for i in range(10):
+        iou = 0.5 + i * 0.05
+        ap = np.empty(shape=(len(aps), aps[0].shape[0]))
+        for j in range(len(aps)):
+            ap[j] = aps[j][:, i].T
+        ap = ap.T
+       
+        px = np.array(list(range(len(aps))))
+        for j, y in enumerate(ap):
+            axes[i].plot(px, y, linewidth=1, label=f'{names[j]}')  # plot(confidence, metric)
+        
+        y = smooth(ap.mean(0), 0.05)
+        # 'smooth' may change length of array
+        px = np.array(list(range(y.shape[0])))
+        axes[i].plot(px, y, linewidth=3, color='blue', label='all classes')
+        axes[i].set_xlabel(xlabel)
+        axes[i].set_ylabel(ylabel)
+        axes[i].legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+        axes[i].set_title('mAP_' + '{:.2f}'.format(iou) + ' Curve')
+    fig.savefig(save_dir, dpi=250)
+    plt.close(fig)

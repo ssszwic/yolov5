@@ -33,6 +33,11 @@ import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
 
+from utils.plots import plot_lr_scheduler
+from utils.metrics import plot_ap_curve
+
+import requests
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
@@ -111,6 +116,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path = data_dict['train'], data_dict['val']
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
+    print('---------------\n', data_dict)
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
 
@@ -161,6 +167,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     else:
         lf = lambda x: (1 - x / epochs) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+    plot_lr_scheduler(optimizer, scheduler, epochs, save_dir=save_dir)
 
     # EMA
     ema = ModelEMA(model) if RANK in {-1, 0} else None
@@ -201,7 +208,20 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               shuffle=True)
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
+
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
+
+    # aps = []
+    # temp = np.array([[    0.21166,     0.18768,     0.15207,     0.10637,    0.061925,    0.026947,    0.010627,   0.0035312,  0.00048905,   0.0001488],
+    #    [   0.089936,    0.072243,    0.052779,    0.035452,    0.021334,    0.010048,     0.00416,   0.0015864,  0.00025633,   4.513e-05],
+    #    [        0.5,     0.48081,     0.44875,     0.39532,     0.29418,     0.16338,    0.058323,     0.01248,   0.0020898,  0.00020506],
+    #    [   0.047251,    0.046115,    0.043699,    0.038675,    0.032449,    0.020429,    0.008777,   0.0034074,  0.00079966,  3.2833e-05],
+    #    [   0.065198,    0.047595,     0.03185,    0.017825,   0.0096316,   0.0049167,   0.0022487,  0.00060857,   9.674e-05,           0]])
+    # for i in range(100):
+    #     aps.append(temp)
+    # names = ['1', '2', '3', '4', '5']
+    # plot_ap_curve(aps, save_dir=Path(save_dir) / 'ap_curve.png', names=names)
+    # exit(0)
 
     # Process 0
     if RANK in {-1, 0}:
@@ -257,6 +277,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
+    
+    # plot ap every class
+    aps = []
+
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         model.train()
@@ -347,7 +371,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
             if not noval or final_epoch:  # Calculate mAP
-                results, maps, _ = validate.run(data_dict,
+                results, maps, _, ap = validate.run(data_dict,
                                                 batch_size=batch_size // WORLD_SIZE * 2,
                                                 imgsz=imgsz,
                                                 half=amp,
@@ -355,9 +379,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                 single_cls=single_cls,
                                                 dataloader=val_loader,
                                                 save_dir=save_dir,
+                                                verbose=True,
                                                 plots=False,
                                                 callbacks=callbacks,
                                                 compute_loss=compute_loss)
+                aps.append(ap)
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
@@ -400,6 +426,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
+    # plot aps and ap50s
+    plot_ap_curve(aps, save_dir=Path(save_dir) / 'ap_curve.png', names=names)
+
     if RANK in {-1, 0}:
         LOGGER.info(f'\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.')
         for f in last, best:
@@ -407,7 +436,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 strip_optimizer(f)  # strip optimizers
                 if f is best:
                     LOGGER.info(f'\nValidating {f}...')
-                    results, _, _ = validate.run(
+                    results, _, _, _ = validate.run(
                         data_dict,
                         batch_size=batch_size // WORLD_SIZE * 2,
                         imgsz=imgsz,
@@ -627,7 +656,17 @@ def run(**kwargs):
     main(opt)
     return opt
 
+def send_notice(content):
+    token = "ba208d18ed644da7858d0d83fc374cba"
+    title = "TRAINING"
+    url = f"http://www.pushplus.plus/send?token={token}&title={title}&content={content}&template=html"
+    response = requests.request("GET", url)
+    print(response.text, '\n')
 
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
+    # 训练结束后发送通知
+    content = "train finished!"
+    send_notice(content)
+
